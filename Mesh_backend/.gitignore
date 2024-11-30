@@ -37,3 +37,4 @@ out/
 .vscode/
 .env
 /src/main/resources/static/chat.html
+firebase-service-account.json

@@ -14,6 +14,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.util.StringUtils;
+
+import java.util.concurrent.TimeUnit;
+
 @Service
 @RequiredArgsConstructor
 public class SearchService {
@@ -21,16 +27,27 @@ public class SearchService {
     private final PostRepository postRepository;
     private final MarkRepository markRepository;
     private final TokenService tokenService;
+    private final RedisTemplate<String, Object> redisTemplate;
 
     public List<ProjectResponseDTO> searchProjects(String keyword, List<String> categories) {
+        String cacheKey = buildCacheKey(keyword, categories);
+
+        // Redis에서 데이터 조회
+        ValueOperations<String, Object> valueOperations = redisTemplate.opsForValue();
+        List<ProjectResponseDTO> cachedResponse = (List<ProjectResponseDTO>) valueOperations.get(cacheKey);
+
+        if (cachedResponse != null) {
+            return cachedResponse; // 캐시된 데이터 반환
+        }
+
+        // Redis에 데이터가 없으면 DB에서 조회
         List<Post> posts = postRepository.findByPostTitleContainingOrPostContentsContainingOrUser_NicknameContaining(
                 keyword, keyword, keyword
         );
 
-        return posts.stream()
+        List<ProjectResponseDTO> response = posts.stream()
                 .filter(post -> {
                     if (categories != null && !categories.isEmpty()) {
-                        // 모든 카테고리에서 매칭 여부 확인
                         return categories.stream().allMatch(category ->
                                 post.getPmCategories().stream().anyMatch(cat -> cat.getKeyword().equals(category)) ||
                                         post.getDesignCategories().stream().anyMatch(cat -> cat.getKeyword().equals(category)) ||
@@ -38,10 +55,10 @@ public class SearchService {
                                         post.getFrontCategories().stream().anyMatch(cat -> cat.getKeyword().equals(category))
                         );
                     }
-                    return true; // categories가 없으면 필터링 없이 반환
+                    return true;
                 })
                 .map(post -> {
-                    List<String> postCategories = collectCategories(post); // PM, Design 등 카테고리 이름만 추출
+                    List<String> postCategories = collectCategories(post);
                     boolean isBookmarked = markRepository.existsByUser_UserIdAndPost_PostId(
                             post.getUser().getUserId(), post.getPostId()
                     );
@@ -58,21 +75,52 @@ public class SearchService {
                     );
                 })
                 .collect(Collectors.toList());
+
+        // Redis에 데이터 캐싱
+        valueOperations.set(cacheKey, response, 10, TimeUnit.MINUTES); // 10분 동안 캐싱
+
+        return response;
     }
 
+    private String buildCacheKey(String keyword, List<String> categories) {
+        StringBuilder keyBuilder = new StringBuilder("search::");
+        keyBuilder.append(keyword);
 
-    // 특정 게시글(Post)에 카테고리 키워드가 포함되는지 확인
-    private boolean postContainsCategories(Post post, List<String> categories) {
-        List<String> postCategories = collectCategories(post); // 게시글의 카테고리 리스트
-        for (String category : categories) {
-            if (postCategories.contains(category)) {
-                return true; // 포함된 경우
-            }
+        if (categories != null && !categories.isEmpty()) {
+            keyBuilder.append("::").append(String.join(",", categories));
         }
-        return false; // 포함되지 않은 경우
+
+        return keyBuilder.toString();
     }
 
-    // 게시글의 모든 카테고리를 수집하는 메서드
+    public ProjectDetailResponse getProjectDetail(Long projectId, String token) {
+        String accessToken = token.replace("Bearer ", "");
+        User user = tokenService.getUserFromAccessToken(accessToken);
+
+        Post post = postRepository.findById(projectId)
+                .orElseThrow(() -> new RuntimeException("프로젝트를 찾을 수 없습니다."));
+
+        post.setViews(post.getViews() != null ? post.getViews() + 1 : 1L);
+        postRepository.save(post);
+
+        boolean isMarked = markRepository.existsByUser_UserIdAndPost_PostId(user.getUserId(), projectId);
+
+        return new ProjectDetailResponse(
+                post.getPostId(),
+                post.getPostTitle(),
+                post.getPostContents(),
+                post.getProjectImageUrl(),
+                post.getProjectFile(),
+                post.getViews(),
+                post.getDeadline(),
+                post.getCreateAt(),
+                post.getStatus(),
+                post.getUser().getNickname(),
+                post.getUser().getProfileImageUrl(),
+                isMarked
+        );
+    }
+
     private List<String> collectCategories(Post post) {
         List<String> categories = new ArrayList<>();
 
@@ -90,38 +138,5 @@ public class SearchService {
         }
 
         return categories;
-    }
-
-    public ProjectDetailResponse getProjectDetail(Long projectId, String token) {
-        // JWT 토큰에서 사용자 정보 추출
-        String accessToken = token.replace("Bearer ", "");
-        User user = tokenService.getUserFromAccessToken(accessToken);
-
-        // 게시글 조회
-        Post post = postRepository.findById(projectId)
-                .orElseThrow(() -> new RuntimeException("프로젝트를 찾을 수 없습니다."));
-
-        // 조회수 증가
-        post.setViews(post.getViews() != null ? post.getViews() + 1 : 1L);
-        postRepository.save(post);
-
-        // 북마크 여부 확인
-        boolean isMarked = markRepository.existsByUser_UserIdAndPost_PostId(user.getUserId(), projectId);
-
-        // DTO 생성 및 반환
-        return new ProjectDetailResponse(
-                post.getPostId(),
-                post.getPostTitle(),
-                post.getPostContents(),
-                post.getProjectImageUrl(),
-                post.getProjectFile(),
-                post.getViews(),
-                post.getDeadline(),
-                post.getCreateAt(),
-                post.getStatus(),
-                post.getUser().getNickname(),
-                post.getUser().getProfileImageUrl(),
-                isMarked
-        );
     }
 }

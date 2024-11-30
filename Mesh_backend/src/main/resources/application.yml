@@ -1,5 +1,10 @@
 server:
-  port : 8080
+  port : 8081
+  spring:
+    redis:
+      host: 210.94.220.228  # Ubuntu 서버의 외부 IP
+      port: 6379           # Redis 기본 포트
+
 
 spring :
   config:
